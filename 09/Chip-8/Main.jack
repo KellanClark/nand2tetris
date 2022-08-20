@@ -1,0 +1,9 @@
+class Main {
+    function void main() {
+        var Chip8 emu;
+        let emu = Chip8.new();
+        do emu.run();
+        do emu.dispose();
+        return;
+    }
+}

@@ -1,0 +1,325 @@
+
+class Chip8 {
+    field int PC, I, SP, DT, seed, key, opcode;
+    field Array stack, V, mem, framebuffer;
+    field boolean keyValid;
+    
+    constructor Chip8 new() {
+        let PC = 512;
+        let I = 0;
+        let SP = 0;
+        let DT = 0;
+
+        let stack = Array.new(16);
+        let V = Array.new(16);
+        let mem = Array.new(4096);
+        let framebuffer = Array.new(64 * 32);
+
+        do Screen.setColor(true);
+        do Screen.drawRectangle(0, 0, 511, 255);
+
+        return this;
+    }
+
+    method void dispose() {
+        do Memory.deAlloc(this);
+        return;
+    }
+
+    method void run() {
+        var int carry, n, nn, nnn, x, y;
+        var boolean end;
+
+        do loadFont();
+        do Rom.loadRom(mem);
+
+        let end = false;
+        while (~end) {
+            let nn = mem[PC + 1];
+            let x = mem[PC] & 15;
+            let y = (nn / 16) & 15;
+            let opcode = (mem[PC] * 256) | nn;
+            let PC = (PC + 2) & 4095;
+            let nnn = opcode & 4095;
+
+            if (opcode & ~32767) {
+                if (opcode & 16384) {
+                    if (opcode & 8192) {
+                        if (opcode & 4096) {
+                            if (nn = 101) { // 0xFx65 - LD Vx, [I]
+                                while (x > -1) {
+                                    let V[x] = mem[I + x];
+                                    let x = x - 1;
+                                }
+                            }
+                            if (nn = 85) { // 0xFx55 - LD [I], Vx
+                                while (x > -1) {
+                                    let mem[I + x] = V[x];
+                                    let x = x - 1;
+                                }
+                            }
+                            if (nn = 51) { // 0xFx33 - LD B, Vx
+                                let mem[I] = V[x] / 100;
+                                let mem[I + 1] = (V[x] - (mem[I] * 100)) / 10;
+                                let mem[I + 2] = V[x] - (mem[I] * 100) - (mem[I + 1] * 10);
+                            }
+                            if (nn = 41) { // 0xFx29 - LD F, Vx
+                                let I = (V[x] & 15) * 5;
+                            }
+                            if (nn = 30) { // 0xFx1E - ADD I, Vx
+                                let I = (I + V[x]) & 4095;
+                            }
+                            if (nn = 24) { // 0xFx18 - LD ST, Vx
+                                // Placeholder in case I find a way to represent sound
+                            }
+                            if (nn = 21) { // 0xFx15 - LD DT, Vx
+                                let DT = V[x];
+                            }
+                            if (nn = 10) { // 0xFx0A - LD Vx, K
+                                do updateKeys();
+                                if (keyValid) {
+                                    let V[x] = key;
+                                } else {
+                                    let PC = PC - 2;
+                                }
+                            }
+                            if (nn = 7) { // 0xFx07 - LD Vx, DT
+                                let V[x] = DT;
+                            }
+                        } else {
+                            do updateKeys();
+                            if (nn = 161) { // 0xExA1 - SKNP Vx
+                                if (keyValid & ~(key = (V[x] & 15))) {
+                                    let PC = PC + 2;
+                                }
+                            }
+                            if (nn = 158) { // 0xEx9E - SKP Vx
+                                if (keyValid & (key = (V[x] & 15))) {
+                                    let PC = PC + 2;
+                                }
+                            }
+                        }
+                    } else {
+                        if (opcode & 4096) { // 0xDxyn - DRW Vx, Vy, nibble
+                            do draw(V[x] & 63, V[y] & 31, opcode & 15);
+                        } else { // 0xCxkk - RND Vx, byte
+                            let V[x] = random() & nn;
+                        }
+                    }
+                } else {
+                    if (opcode & 8192) {
+                        if (opcode & 4096) { // 0xBnnn - JP V0, addr
+                            let PC = (V[0] + nnn) & 4095;
+                        } else { // 0xAnnn - LD I, addr
+                            let I = nnn;
+                        }
+                    } else {
+                        if (opcode & 4096) { // 0x9xy0 - SNE Vx, Vy
+                            if (~(V[x] = V[y])) {
+                                let PC = PC + 2;
+                            }
+                        } else {
+                            let n = opcode & 15;
+                            if (n = 14) { // 0x8xyE - SHL Vx {, Vy}
+                                let carry = V[x] / 128;
+                                let V[x] = (V[x] + V[x]) & 255;
+                                let V[15] = carry;
+                            }
+                            if (n = 7) { // 0x8xy7 - SUBN Vx, Vy
+                                if (V[y] > V[x]) { let carry = 1; } else {let carry = 0; }
+                                let V[x] = (V[y] - V[x]) & 255;
+                                let V[15] = carry;
+                            }
+                            if (n = 6) { // 0x8xy6 - SHR Vx {, Vy}
+                                let carry = opcode & 1;
+                                let V[x] = V[x] / 2;
+                                let V[15] = carry;
+                            }
+                            if (n = 5) { // 0x8xy5 - SUB Vx, Vy
+                                if (V[x] > V[y]) { let carry = 1; } else { let carry = 0; }
+                                let V[x] = (V[x] - V[y]) & 255;
+                                let V[15] = carry;
+                            }
+                            if (n = 4) { // 0x8xy4 - ADD Vx, Vy
+                                let V[x] = V[x] + V[y];
+                                if (V[x] > 255) {
+                                    let V[x] = V[x] & 255;
+                                    let V[15] = 1;
+                                } else {
+                                    let V[15] = 0;
+                                }
+                            }
+                            if (n = 3) { // 0x8xy3 - XOR Vx, Vy
+                                let V[x] = (V[x] & ~V[y]) | (~V[x] & V[y]);
+                            }
+                            if (n = 2) { // 0x8xy2 - AND Vx, Vy
+                                let V[x] = V[x] & V[y];
+                            }
+                            if (n = 1) { // 0x8xy1 - OR Vx, Vy
+                                let V[x] = V[x] | V[y];
+                            }
+                            if (n = 0) { // 0x8xy0 - LD Vx, Vy
+                                let V[x] = V[y];
+                            }
+                        }
+                    }
+                }
+            } else {
+                if (opcode & 16384) {
+                    if (opcode & 8192) {
+                        if (opcode & 4096) { // 0x7xkk - ADD Vx, byte
+                            let V[x] = (V[x] + nn) & 255;
+                        } else { // 0x6xkk - LD Vx, byte
+                            let V[x] = nn;
+                        }
+                    } else {
+                        if (opcode & 4096) { // 0x5xy0 - SE Vx, Vy
+                            if (V[x] = V[y]) {
+                                let PC = PC + 2;
+                            }
+                        } else { // 0x4xkk - SNE Vx, byte
+                            if (~(V[x] = nn)) {
+                                let PC = PC + 2;
+                            }
+                        }
+                    }
+                } else {
+                    if (opcode & 8192) {
+                        if (opcode & 4096) { // 0x3xkk - SE Vx, byte
+                            if (V[x] = nn) {
+                                let PC = PC + 2;
+                            }
+                        } else { // 0x2nnn - CALL addr
+                            let stack[SP] = PC;
+                            let SP = SP + 1;
+                            let PC = nnn;
+                        }
+                    } else {
+                        if (opcode & 4096) { // 0x1nnn - JP addr
+                            let PC = nnn;
+                        } else {
+                            if (opcode = 238) { // 0x00EE - RET
+                                let SP = SP - 1;
+                                let PC = stack[SP];
+                            }
+                            if (opcode = 224) { // 224 - CLS
+                                do Screen.setColor(true);
+                                do Screen.drawRectangle(0, 0, 511, 255);
+                                let nnn = 0;
+                                while (nnn < (64 * 32)) {
+                                    let framebuffer[nnn] = 0;
+                                    let nnn = nnn + 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (DT > 0) {
+                let DT = DT - 1;
+            }
+        }
+
+        return;
+    }
+
+    method int random() { // 16 bit xorshift I coppied off the internet
+        var int tmp;
+
+        let tmp = seed * 128;
+        let seed = (seed & ~tmp) | (~seed & tmp);
+        let tmp = seed / 512;
+        let seed = (seed & ~tmp) | (~seed & tmp);
+        let tmp = seed * 256;
+        let seed = (seed & ~tmp) | (~seed & tmp);
+
+        return seed;
+    }
+
+    method void draw(int x, int y, int height) {
+        var int pixel, index, yline, xline, mask, rely, relx;
+        /*do Output.printInt(x); do Output.println();
+        do Output.printInt(y); do Output.println();
+        do Output.printInt(height); do Output.println();*/
+
+        let V[15] = 0;
+        let yline = 0;
+        while (yline < height) {
+            let pixel = mem[I + yline];
+            let rely = (y + yline) * 8; // Multiplying by 8 here to save some math later
+
+            let xline = 0;
+            let mask = 128;
+            while (xline < 8) {
+                let relx = x + xline;
+                let index = relx + (rely * 8);
+                if (pixel & mask) {
+                    if (framebuffer[index] = 1) {
+                        let V[15] = 1;
+                        let framebuffer[index] = 0;
+                        do Screen.setColor(true);
+                        do Screen.drawRectangle(relx * 8, rely, (relx * 8) + 7, rely + 7);
+                    } else {
+                        let framebuffer[index] = 1;
+                        do Screen.setColor(false);
+                        do Screen.drawRectangle(relx * 8, rely, (relx * 8) + 7, rely + 7);
+                    }
+                }
+
+                let xline = xline + 1;
+                let mask = mask / 2;
+            }
+
+            let yline = yline + 1;
+        }
+
+        return;
+    }
+
+    method void updateKeys() {
+        var char pressed;
+        let pressed = Keyboard.keyPressed();
+        let keyValid = false;
+
+        if (pressed = 49) { let keyValid = true; let key = 1; }  // 1 -> 1
+        if (pressed = 50) { let keyValid = true; let key = 2; }  // 2 -> 2
+        if (pressed = 51) { let keyValid = true; let key = 3; }  // 3 -> 3
+        if (pressed = 52) { let keyValid = true; let key = 12; } // 4 -> C
+        if (pressed = 81) { let keyValid = true; let key = 4; }  // Q -> 4
+        if (pressed = 87) { let keyValid = true; let key = 5; }  // W -> 5
+        if (pressed = 69) { let keyValid = true; let key = 6; }  // E -> 6
+        if (pressed = 82) { let keyValid = true; let key = 13; } // R -> D
+        if (pressed = 65) { let keyValid = true; let key = 7; }  // A -> 7
+        if (pressed = 83) { let keyValid = true; let key = 8; }  // S -> 8
+        if (pressed = 68) { let keyValid = true; let key = 9; }  // D -> 9
+        if (pressed = 70) { let keyValid = true; let key = 14; } // F -> E
+        if (pressed = 90) { let keyValid = true; let key = 10; } // Z -> A
+        if (pressed = 88) { let keyValid = true; let key = 0; }  // X -> 0
+        if (pressed = 67) { let keyValid = true; let key = 11; } // C -> B
+        if (pressed = 86) { let keyValid = true; let key = 15; } // V -> F
+
+        return;
+    }
+
+    method void loadFont() {
+        let mem[ 0]=240; let mem[ 1]=144; let mem[ 2]=144; let mem[ 3]=144; let mem[ 4]=240; // 0
+        let mem[ 5]= 32; let mem[ 6]= 96; let mem[ 7]= 32; let mem[ 8]= 32; let mem[ 9]=112; // 1
+        let mem[10]=240; let mem[11]= 16; let mem[12]=240; let mem[13]=128; let mem[14]=240; // 2
+        let mem[15]=240; let mem[16]= 16; let mem[17]=240; let mem[18]= 16; let mem[19]=240; // 3
+        let mem[20]=144; let mem[21]=144; let mem[22]=240; let mem[23]= 16; let mem[24]= 16; // 4
+        let mem[25]=240; let mem[26]=128; let mem[27]=240; let mem[28]= 16; let mem[29]=240; // 5
+        let mem[30]=240; let mem[31]=128; let mem[32]=240; let mem[33]=144; let mem[34]=240; // 6
+        let mem[35]=240; let mem[36]= 16; let mem[37]= 32; let mem[38]= 64; let mem[39]= 64; // 7
+        let mem[40]=240; let mem[41]=144; let mem[42]=240; let mem[43]=144; let mem[44]=240; // 8
+        let mem[45]=240; let mem[46]=144; let mem[47]=240; let mem[48]= 16; let mem[49]=240; // 9
+        let mem[50]=240; let mem[51]=144; let mem[52]=240; let mem[53]=144; let mem[54]=144; // A
+        let mem[55]=224; let mem[56]=144; let mem[57]=224; let mem[58]=144; let mem[59]=224; // B
+        let mem[60]=240; let mem[61]=128; let mem[62]=128; let mem[63]=128; let mem[64]=240; // C
+        let mem[65]=224; let mem[66]=144; let mem[67]=144; let mem[68]=144; let mem[69]=224; // D
+        let mem[70]=240; let mem[71]=128; let mem[72]=240; let mem[73]=128; let mem[74]=240; // E
+        let mem[75]=240; let mem[76]=128; let mem[77]=240; let mem[78]=128; let mem[79]=128; // F
+
+        return;
+    }
+}
